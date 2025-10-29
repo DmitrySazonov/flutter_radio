@@ -1,0 +1,472 @@
+openapi: 3.0.3
+info:
+  title: Flutter Radio Local API
+  version: "1.5.0"
+  description: |
+    Локальный REST API интернет-радио. Сервер поднимается на устройстве Android и слушает на указанном порту (по умолчанию 8080).
+    Веб-пульт доступен по корню `/` (HTML), а ниже — JSON-эндпоинты.
+
+    Особенности:
+    - При включённом режиме **startLiveOnResume** ("мягкая пауза") запрос `/pause` не останавливает поток, а глушит звук (mute), `/play` — восстанавливает громкость (unmute).
+    - Поле `playing` в `/status` маскируется в `false`, если активна мягкая пауза (`softPaused: true`), даже если поток физически играет.
+    - Аутентификация (если включена в приложении) — API-ключ через заголовок `x-api-key` или query-параметр `token`.
+
+servers:
+  - url: http://{host}:{port}
+    description: Локальный сервер на устройстве/в LAN
+    variables:
+      host:
+        default: 192.168.0.2
+      port:
+        default: "8080"
+
+security:
+  - ApiKeyHeader: []
+  - ApiKeyQuery: []
+
+paths:
+  /:
+    get:
+      summary: Веб-пульт (HTML)
+      description: Возвращает встроенный веб-интерфейс управления плеером.
+      responses:
+        "200":
+          description: HTML страницы пульта
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /play:
+    get:
+      summary: Play / Unmute (при live)
+      description: |
+        Запускает воспроизведение. Если включён режим **startLiveOnResume** и сейчас мягкая пауза (`softPaused=true`), то восстанавливает громкость (unmute) без переинициализации потока.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StateResponse' }
+
+  /pause:
+    get:
+      summary: Pause / Mute (при live)
+      description: |
+        Ставит на паузу. Если включён **startLiveOnResume**, то поток не останавливается — звук глушится (mute) и продолжает обновляться ICY-мета (артист/треки).
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StateResponse' }
+
+  /stop:
+    get:
+      summary: Полная остановка
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StateResponse' }
+
+  /next:
+    get:
+      summary: Следующая станция
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OkResponse' }
+
+  /prev:
+    get:
+      summary: Предыдущая станция
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OkResponse' }
+
+  /volume:
+    get:
+      summary: Установить громкость
+      parameters:
+        - in: query
+          name: value
+          description: Новая громкость 0.0–1.0. При мягкой паузе значение запоминается и применится при unmute.
+          required: true
+          schema:
+            type: number
+            format: float
+            minimum: 0
+            maximum: 1
+      responses:
+        "200":
+          description: Текущая/сохранённая громкость
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/VolumeResponse' }
+        "400":
+          description: Некорректное значение
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /select:
+    get:
+      summary: Выбрать станцию по индексу
+      parameters:
+        - in: query
+          name: index
+          required: true
+          schema:
+            type: integer
+            minimum: 0
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OkResponse' }
+        "400":
+          description: Неверный индекс
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /stations:
+    get:
+      summary: Список станций (без URL)
+      responses:
+        "200":
+          description: Текущий список станций и активный индекс
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StationsListResponse' }
+
+  /stations/full:
+    get:
+      summary: Список станций (с URL)
+      responses:
+        "200":
+          description: Полный список станций c URL
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StationsFullListResponse' }
+
+  /stations/add:
+    post:
+      summary: Добавить станцию
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AddStationRequest' }
+      responses:
+        "200":
+          description: Успех/ошибка
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OkResponse' }
+        "400":
+          description: Некорректные данные
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        "405":
+          description: Неподдерживаемый метод
+
+  /stations/delete:
+    get:
+      summary: Удалить станцию (вариант через query)
+      parameters:
+        - in: query
+          name: index
+          required: true
+          schema:
+            type: integer
+            minimum: 0
+      responses:
+        "200":
+          description: Удалено
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OkResponse' }
+        "400":
+          description: Ошибка удаления
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OkResponse' }
+    post:
+      summary: Удалить станцию (вариант через JSON)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DeleteStationRequest' }
+      responses:
+        "200":
+          description: Удалено
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OkResponse' }
+        "400":
+          description: Ошибка удаления
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OkResponse' }
+
+  /stations/reorder:
+    post:
+      summary: Переупорядочить станции (переместить элемент)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReorderStationsRequest' }
+      responses:
+        "200":
+          description: Успех/ошибка
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OkResponse' }
+        "400":
+          description: Некорректные индексы
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        "405":
+          description: Неподдерживаемый метод
+
+  /settings:
+    get:
+      summary: Прочитать настройки
+      description: Возвращает флаг режима мягкой паузы/запуска с live-позиции.
+      responses:
+        "200":
+          description: Текущие настройки
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SettingsResponse' }
+    post:
+      summary: Обновить настройки
+      description: Установить `startLiveOnResume` (мягкая пауза).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SettingsRequest' }
+      responses:
+        "200":
+          description: Применённые настройки
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SettingsResponse' }
+        "400":
+          description: Нет требуемого поля
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        "405":
+          description: Неподдерживаемый метод
+
+  /status:
+    get:
+      summary: Статус плеера
+      description: |
+        Возвращает состояние плеера, активную станцию, текущий ICY-title, громкость и флаги `softPaused` и `startLiveOnResume`.
+        Обрати внимание: если `softPaused = true`, поле `playing` будет **false**.
+      responses:
+        "200":
+          description: Текущий статус
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StatusResponse' }
+
+components:
+  securitySchemes:
+    ApiKeyHeader:
+      type: apiKey
+      in: header
+      name: x-api-key
+      description: Необязательный API-ключ (если включён в приложении).
+    ApiKeyQuery:
+      type: apiKey
+      in: query
+      name: token
+      description: Альтернативно можно передать ключ через query-параметр.
+
+  schemas:
+    OkResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+          example: true
+
+    ErrorResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+          example: false
+        error:
+          type: string
+          example: "bad index"
+
+    StateResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+          example: true
+        state:
+          type: string
+          enum: [playing, paused, stopped]
+          example: playing
+
+    VolumeResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+          example: true
+        volume:
+          type: number
+          format: float
+          example: 0.75
+
+    StationItem:
+      type: object
+      properties:
+        index:
+          type: integer
+          example: 0
+        name:
+          type: string
+          example: "Lounge FM"
+
+    StationItemFull:
+      allOf:
+        - $ref: '#/components/schemas/StationItem'
+        - type: object
+          properties:
+            url:
+              type: string
+              example: "http://example.com/stream.mp3"
+
+    StationsListResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+          example: true
+        current:
+          type: integer
+          example: 2
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/StationItem'
+
+    StationsFullListResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+          example: true
+        current:
+          type: integer
+          example: 2
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/StationItemFull'
+
+    AddStationRequest:
+      type: object
+      required: [name, url]
+      properties:
+        name:
+          type: string
+          example: "Deep House Radio"
+        url:
+          type: string
+          example: "https://radio.example.com/stream"
+
+    DeleteStationRequest:
+      type: object
+      required: [index]
+      properties:
+        index:
+          type: integer
+          minimum: 0
+          example: 1
+
+    ReorderStationsRequest:
+      type: object
+      required: [old, new]
+      properties:
+        old:
+          type: integer
+          minimum: 0
+          example: 3
+        new:
+          type: integer
+          minimum: 0
+          example: 0
+
+    SettingsRequest:
+      type: object
+      required: [startLiveOnResume]
+      properties:
+        startLiveOnResume:
+          type: boolean
+          example: true
+
+    SettingsResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+          example: true
+        startLiveOnResume:
+          type: boolean
+          example: true
+
+    StatusResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+          example: true
+        playing:
+          type: boolean
+          description: Маскируется в false, если активна мягкая пауза (softPaused=true)
+          example: false
+        currentIndex:
+          type: integer
+          example: 1
+        station:
+          type: string
+          nullable: true
+          example: "Radio Paradise"
+        title:
+          type: string
+          nullable: true
+          description: Текущее ICY-название (артист — трек)
+          example: "Massive Attack — Teardrop"
+        volume:
+          type: number
+          format: float
+          example: 0.8
+        softPaused:
+          type: boolean
+          example: true
+        startLiveOnResume:
+          type: boolean
+          example: true

@@ -1,0 +1,42 @@
+# Flutter & Dart
+.dart_tool/
+.packages
+.flutter-plugins
+.flutter-plugins-dependencies
+.melosTool/
+.pub-cache/
+.pub/
+build/
+coverage/
+pubspec.lock  # <-- УБЕРИТЕ ЭТУ СТРОКУ, если это приложение (для app лучше коммитить lock)
+# (т.е. для вашего случая строку pubspec.lock лучше не игнорировать)
+
+# Editors / OS
+.idea/
+.vscode/
+*.iml
+*.swp
+.DS_Store
+
+# Android
+android/.gradle/
+android/**/build/
+android/local.properties
+android/key.properties
+android/app/release-key.jks
+android/app/*.keystore
+android/app/*.jks
+android/app/**/outputs/
+*.aab
+*.apk
+
+# iOS
+ios/Pods/
+ios/.symlinks/
+ios/Flutter/Flutter.framework
+ios/Flutter/Flutter.podspec
+ios/**/DerivedData/
+ios/.generated/
+
+# Logs
+*.log
