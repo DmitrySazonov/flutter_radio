@@ -1,3 +1,4 @@
+// main.dart
 import 'dart:async';
 import 'dart:convert';
 import 'dart:developer' as dev;
@@ -532,11 +533,14 @@ class WebRemoteServer {
     <div id="now" class="title muted">—</div>
     <div class="row" style="margin:12px 0">
       <button onclick="api('/prev')">⏮️ Prev</button>
-      <button onclick="api('/play')">▶️ Play</button>
-      <button onclick="api('/pause')">⏸️ Pause</button>
+      <button id="ppBtn" onclick="togglePlayPause()">▶️ Play</button>
       <button onclick="api('/next')">⏭️ Next</button>
     </div>
-    <div>Volume: <input id="vol" type="range" min="0" max="1" step="0.01" value="1"></div>
+    <div style="display:flex;align-items:center;gap:10px;margin:10px 0;">
+      <span>🔊</span>
+      <input id="vol" type="range" min="0" max="1" step="0.01" value="1"
+             style="flex:1;height:10px;">
+    </div>
     <div id="list" class="list"></div>
   </div>
 
@@ -573,6 +577,25 @@ class WebRemoteServer {
 const token='${t}';
 function qp(url){return token? url+(url.includes('?')?'&':'?')+'token='+encodeURIComponent(token):url}
 let settingVol=false;
+let gPlaying=false; // текущее состояние из /status
+
+function setPPBtn(playing){
+  const btn = document.getElementById('ppBtn');
+  if(!btn) return;
+  gPlaying = !!playing;
+  btn.textContent = gPlaying ? '⏸️ Pause' : '▶️ Play';
+  btn.setAttribute('aria-pressed', gPlaying ? 'true' : 'false');
+}
+
+function togglePlayPause(){
+  const btn = document.getElementById('ppBtn');
+  if(btn){ btn.disabled = true; setTimeout(()=>btn.disabled=false, 350); }
+  if(gPlaying){
+    api('/pause');
+  }else{
+    api('/play');
+  }
+}
 
 function toggleEdit(){
   document.getElementById('view').classList.toggle('hidden');
@@ -600,6 +623,8 @@ async function refresh(){
     }
     const liveEl = document.getElementById('live');
     if (liveEl) liveEl.checked = !!s.startLiveOnResume;
+
+    setPPBtn(!!s.playing);
     await rebuildList(s.currentIndex);
   }catch(e){}
 }
