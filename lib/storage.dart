@@ -6,12 +6,13 @@ class StationStorage {
   static const _keyStations = 'stations_v1';
   static const _keyLastIndex = 'last_index_v1';
   static const _keyVolume = 'volume_v1';
-  static const _keyStartLive = 'start_live_on_resume_v1'; // новая настройка
+  static const _keyStartLive = 'start_live_on_resume_v1';
+  static const _keyWebRemoteEnabled = 'web_remote_enabled_v1'; // <-- NEW
 
   Future<List<Station>> loadStations() async {
     final sp = await SharedPreferences.getInstance();
     final raw = sp.getString(_keyStations);
-    if (raw == null) return const []; // вернём пусто — в UI инициализируем дефолты
+    if (raw == null) return const [];
     final List list = jsonDecode(raw) as List;
     return list.map((e) => Station.fromJson(e as Map<String, dynamic>)).toList();
   }
@@ -53,5 +54,16 @@ class StationStorage {
   Future<void> saveStartLiveOnResume(bool enabled) async {
     final sp = await SharedPreferences.getInstance();
     await sp.setBool(_keyStartLive, enabled);
+  }
+
+  Future<bool?> loadWebRemoteEnabled() async {
+    final sp = await SharedPreferences.getInstance();
+    if (!sp.containsKey(_keyWebRemoteEnabled)) return null;
+    return sp.getBool(_keyWebRemoteEnabled);
+  }
+
+  Future<void> saveWebRemoteEnabled(bool enabled) async {
+    final sp = await SharedPreferences.getInstance();
+    await sp.setBool(_keyWebRemoteEnabled, enabled);
   }
 }

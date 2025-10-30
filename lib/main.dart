@@ -775,17 +775,21 @@ class _HomePageState extends State<HomePage> {
   Future<void> _ensureSelectedVisible() async {
     if (_currentIndex == 0) {
       if (_listCtrl.hasClients) {
-        await _listCtrl.animateTo(0,
-            duration: const Duration(milliseconds: 250),
-            curve: Curves.easeOut);
+        await _listCtrl.animateTo(
+          0,
+          duration: const Duration(milliseconds: 250),
+          curve: Curves.easeOut,
+        );
       }
       return;
     }
     if (_currentIndex == _stations.length - 1) {
       if (_listCtrl.hasClients) {
-        await _listCtrl.animateTo(_listCtrl.position.maxScrollExtent,
-            duration: const Duration(milliseconds: 250),
-            curve: Curves.easeOut);
+        await _listCtrl.animateTo(
+          _listCtrl.position.maxScrollExtent,
+          duration: const Duration(milliseconds: 250),
+          curve: Curves.easeOut,
+        );
       }
       return;
     }
@@ -826,6 +830,10 @@ class _HomePageState extends State<HomePage> {
       final live = await storage.loadStartLiveOnResume();
       _startLiveOnResume = live ?? false;
 
+      // Восстановить состояние тумблера веб-пульта
+      final webOn = await storage.loadWebRemoteEnabled();
+      final shouldStartWeb = webOn == true;
+
       final items =
           _stations.map((s) => MediaItem(id: s.url, title: s.name)).toList();
       await widget.handler.init(items, startIndex: _currentIndex);
@@ -849,7 +857,11 @@ class _HomePageState extends State<HomePage> {
 
       if (mounted) setState(() {});
       _syncItemKeys();
-      await _ensureSelectedVisible();
+
+      // Автозапуск веб-пульта, если был включён
+      if (shouldStartWeb) {
+        await _toggleServer(true);
+      }
     } catch (e, st) {
       dev.log('Init failed', error: e, stackTrace: st);
     }
@@ -992,10 +1004,16 @@ class _HomePageState extends State<HomePage> {
         );
         await _remote!.start();
         _lanUrl = await _findLanUrl(port: _remote!.port);
+
+        // Сохраняем состояние тумблера «включено»
+        await storage.saveWebRemoteEnabled(true);
       } else {
         await _remote?.stop();
         _remote = null;
         _lanUrl = null;
+
+        // Сохраняем состояние тумблера «выключено»
+        await storage.saveWebRemoteEnabled(false);
       }
     } catch (e, st) {
       dev.log('toggle server failed', error: e, stackTrace: st);
