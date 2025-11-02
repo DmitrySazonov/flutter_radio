@@ -1,5 +1,7 @@
 # Flutter Radio
 
+![Главный экран](/screenshots/home.png)
+
 Небольшое интернет-радио для Android (Flutter).  
 Поддерживает воспроизведение потоков, плей/пауза/след/пред, управление громкостью, редактирование списка станций, **веб-пульт по Wi-Fi** и локальный **REST API**.
 
@@ -49,3 +51,13 @@ flutter run
 # 3) Релизный APK
 flutter build apk --release
 # APK будет в build/app/outputs/flutter-apk/app-release.apk
+```
+
+## Меню настроек
+
+![Меню настроек](/screenshots/settings.png)
+
+## Веб интерфейс
+Вариант отображения веб интерфейса с другого устройства в той же сети
+
+![Веб интерфейс](/screenshots/web_ui.png)
