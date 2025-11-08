@@ -4,15 +4,16 @@ import 'package:audio_service/audio_service.dart';
 import 'package:audio_session/audio_session.dart';
 import 'package:just_audio/just_audio.dart';
 
-/// Обработчик фонового воспроизведения и медиакоманд.
+/// Background audio handler for playback and media commands.
 class RadioAudioHandler extends BaseAudioHandler
     with QueueHandler, SeekHandler {
   final _player = AudioPlayer();
   int _currentIndex = 0;
   List<MediaItem> _items = const [];
+  bool _sessionConfigured = false;
 
   RadioAudioHandler() {
-    // Пробрасываем состояние плеера в PlaybackState
+    // Forward player state into PlaybackState.
     _player.playbackEventStream.listen((event) {
       final playing = _player.playing;
       playbackState.add(
@@ -34,7 +35,7 @@ class RadioAudioHandler extends BaseAudioHandler
       );
     });
 
-    // Обновляем заголовок из ICY-метаданных, если сервер их шлёт.
+    // Update title from ICY metadata when the server provides it.
     _player.icyMetadataStream.listen((icy) {
       if (icy == null) return;
       final info = icy.info?.title ?? icy.headers?.name;
@@ -45,21 +46,75 @@ class RadioAudioHandler extends BaseAudioHandler
     });
   }
 
+  /// Initial queue setup. Sets the audio source for the starting item.
   Future<void> init(List<MediaItem> items, {int startIndex = 0}) async {
     _items = items;
     queue.add(items);
-    _currentIndex = (startIndex >= 0 && startIndex < items.length) ? startIndex : 0;
+    if (_items.isEmpty) return;
+
+    _currentIndex =
+    (startIndex >= 0 && startIndex < items.length) ? startIndex : 0;
     mediaItem.add(items[_currentIndex]);
 
-    final session = await AudioSession.instance;
-    await session.configure(const AudioSessionConfiguration.music());
+    if (!_sessionConfigured) {
+      final session = await AudioSession.instance;
+      await session.configure(const AudioSessionConfiguration.music());
+      _sessionConfigured = true;
+    }
 
     await _player.setAudioSource(
       AudioSource.uri(Uri.parse(items[_currentIndex].id)),
     );
   }
 
-  // Базовые команды
+  /// Update queue without interrupting playback when the current URL stays the same.
+  ///
+  /// - [preserveByUrl]: if provided, tries to keep playing this URL.
+  ///   If omitted, the current mediaItem's id is used.
+  /// - If the current URL no longer exists (e.g., deleted), switches to the
+  ///   resolved [_currentIndex] and resumes playback if it was playing.
+  Future<void> refreshQueue(
+      List<MediaItem> items, {
+        String? preserveByUrl,
+      }) async {
+    final wasPlaying = _player.playing;
+    final currentId = preserveByUrl ?? mediaItem.valueOrNull?.id;
+
+    _items = items;
+    queue.add(_items);
+
+    if (_items.isEmpty) {
+      // Nothing to play.
+      await _player.stop();
+      return;
+    }
+
+    // Try to restore index by URL/id.
+    int targetIndex = _currentIndex.clamp(0, _items.length - 1);
+    if (currentId != null) {
+      final idx = _items.indexWhere((m) => m.id == currentId);
+      if (idx != -1) targetIndex = idx;
+    }
+
+    final targetId = _items[targetIndex].id;
+
+    // If URL didn't change, avoid resetting AudioSource => no gap.
+    if (currentId != null && currentId == targetId) {
+      _currentIndex = targetIndex;
+      mediaItem.add(_items[_currentIndex]); // keep UI metadata in sync
+      return;
+    }
+
+    // URL changed (e.g., current station was removed): switch explicitly.
+    _currentIndex = targetIndex;
+    mediaItem.add(_items[_currentIndex]);
+    await _player.setAudioSource(AudioSource.uri(Uri.parse(targetId)));
+    if (wasPlaying) {
+      await _player.play();
+    }
+  }
+
+  // Basic commands
   @override
   Future<void> play() => _player.play();
 
@@ -70,6 +125,7 @@ class RadioAudioHandler extends BaseAudioHandler
   Future<void> stop() async {
     await _player.stop();
     return super.stop();
+    // super.stop() not strictly required, but keeps BaseAudioHandler semantics.
   }
 
   @override

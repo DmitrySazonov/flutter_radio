@@ -1,63 +1,67 @@
 # Flutter Radio
 
-![Главный экран](/screenshots/home.png)
+![Main Screen](/screenshots/home.png)
 
-Небольшое интернет-радио для Android (Flutter).  
-Поддерживает воспроизведение потоков, плей/пауза/след/пред, управление громкостью, редактирование списка станций, **веб-пульт по Wi-Fi** и локальный **REST API**.
+A small internet radio app for Android built with Flutter.
+Supports live stream playback, play/pause/next/previous, volume control, station list editing, a **web remote over Wi-Fi**, and a local **REST API**.
 
-## Возможности
+## Features
 
-- Тёмная тема, полноэкранный режим.
-- Плей/пауза, след/пред станция, громкость (слайдер).
-- Редактирование станций: добавление, удаление, изменение порядка (перетаскивание).
-- Отображение текущей играющей композиции (ICY-метаданные, если их отдаёт станция).
-- Встроенный веб-пульт по Wi-Fi:
-    - Удалённое управление со страницы в локальной сети.
-    - Локальный REST API (OpenAPI спецификация).
-- Автопрокрутка списка к текущей станции, включая переход «последняя → первая».
+- Dark theme and fullscreen mode
+- Play / Pause / Next / Previous station controls
+- Volume control with a slider
+- Station list editing: add, delete, and reorder (drag-and-drop)
+- Displays the currently playing track title (from ICY metadata, if provided by the stream)
+- Built-in web remote over Wi-Fi:
+    - Remote control from any device on the same local network
+    - Local REST API (OpenAPI-style specification available)
+- Auto-scroll to the currently playing station, including wrap-around from last → first
 
-## Требования (Android)
+## Requirements (Android)
 
-- Android 7.0+ (API 24+) — рекомендуется Android 8.0+.
-- Подключение к интернету (для потоков).
-- Для веб-пульта: телефон и управляющее устройство должны быть в **одной локальной сети (Wi-Fi)**.
+- Android 7.0+ (API 24+), Android 8.0+ recommended
+- Internet connection (for streaming)
+- For web remote: the phone and the controlling device must be on the **same local Wi-Fi network**
 
-### Разрешения приложения
 
-В `AndroidManifest.xml` используются:
-- `android.permission.INTERNET` — для потокового аудио и веб-пульта.
-- (Опционально) `android.permission.WAKE_LOCK` — если решите добавить `wakelock_plus` для предотвращения засыпания экрана.
+### App permissions
 
-## Использованные технологии
+In `AndroidManifest.xml`:
+- `android.permission.INTERNET` — required for audio streaming and web remote
+- (Optional) `android.permission.WAKE_LOCK` — if you choose to add `wakelock_plus` to keep the screen awake during playback.
+
+## Technologies used
 
 - **Flutter** (Material 3).
-- **[just_audio]** — плеер для работы с потоками.
-- **[audio_service]** — уведомление/сервис воспроизведения и интеграция с системными контролами.
-- Чистый `dart:io` для HTTP-сервера (без внешних зависимостей).
-- ICY-метаданные из `just_audio` (`icyMetadataStream`).
+- **[just_audio]** — audio player for streaming.
+- **[audio_service]** — background playback service and system media controls integration.
+- Чистый `dart:io` HTTP server (no extra dependencies)
+- ICY metadata parsing via `just_audio` (`icyMetadataStream`).
 
 [just_audio]: https://pub.dev/packages/just_audio
 [audio_service]: https://pub.dev/packages/audio_service
 
-## Сборка и запуск
+## Build and run
 
 ```bash
-# 1) Установить зависимости
+# 1) Get dependencies
 flutter pub get
 
-# 2) Запустить на устройстве (debug)
+# 2) Run on a connected device (debug mode)
 flutter run
 
-# 3) Релизный APK
+# 3) Build release APK
 flutter build apk --release
-# APK будет в build/app/outputs/flutter-apk/app-release.apk
+# The APK will be at: build/app/outputs/flutter-apk/app-release.apk
 ```
 
-## Меню настроек
+## Settings menu
 
-![Меню настроек](/screenshots/settings.png)
+![Settings menu 1](/screenshots/settings1.png)
 
-## Веб интерфейс
-Вариант отображения веб интерфейса с другого устройства в той же сети
+![Settings menu 2](/screenshots/settings2.png)
 
-![Веб интерфейс](/screenshots/web_ui.png)
+## Web interface
+A view of the web remote UI opened from another device on the same Wi-Fi network:
+
+![Web interface](/screenshots/web_ui.png)
