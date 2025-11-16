@@ -15,8 +15,8 @@ android {
         applicationId = "com.example.flutter_radio" // ← тоже под себя
         minSdk = flutter.minSdkVersion
         targetSdk = 36
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 12000
+        versionName = "1.2.0"
     }
 
     compileOptions {
