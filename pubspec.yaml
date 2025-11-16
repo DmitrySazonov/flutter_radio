@@ -3,7 +3,7 @@ description: Simple internet radio for Android built with Flutter. Includes Wi-F
 publish_to: 'none'
 
 # RC с семвер-пререлизом. Build number после '+'
-version: 1.2.0-rc1+12001
+version: 1.2.0
 
 environment:
   sdk: '>=3.4.0 <4.0.0'
