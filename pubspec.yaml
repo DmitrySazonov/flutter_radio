@@ -1,6 +1,9 @@
 name: flutter_radio
+description: Simple internet radio for Android built with Flutter. Includes Wi-Fi web remote and local REST API.
 publish_to: 'none'
-version: 0.1.0+1
+
+# RC с семвер-пререлизом. Build number после '+'
+version: 1.2.0
 
 environment:
   sdk: '>=3.4.0 <4.0.0'
@@ -8,12 +11,21 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  audio_service: ^0.18.12
+  audio_service: ^0.18.18
   just_audio: ^0.10.5
   audio_session: ^0.2.2
-  rxdart: ^0.28.0
   shared_preferences: ^2.2.3
   wakelock_plus: ^1.1.4
 
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.1
+
 flutter:
   uses-material-design: true
+
+# Мета (чтобы красиво отображалось на GitHub/в тулзах)
+repository: https://github.com/<your-user-or-org>/<your-repo>
+issue_tracker: https://github.com/<your-user-or-org>/<your-repo>/issues
+homepage: https://github.com/<your-user-or-org>/<your-repo>
