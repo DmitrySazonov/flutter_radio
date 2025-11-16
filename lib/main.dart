@@ -3,6 +3,9 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:developer' as dev;
 import 'dart:io';
+import 'dart:isolate';
+import 'dart:ui';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:audio_service/audio_service.dart';
@@ -12,28 +15,60 @@ import 'package:just_audio/just_audio.dart';
 import 'stations.dart';
 import 'storage.dart';
 
-void main() async {
+void main() {
+  // Инициализируем биндинги как можно раньше
   WidgetsFlutterBinding.ensureInitialized();
 
-  // Immersive at start
-  await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
-  SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
-    statusBarColor: Colors.transparent,
-    systemNavigationBarColor: Colors.black,
-    statusBarIconBrightness: Brightness.light,
-    systemNavigationBarIconBrightness: Brightness.light,
-  ));
+  // Catch framework-level Flutter errors
+  FlutterError.onError = (FlutterErrorDetails details) {
+    FlutterError.presentError(details);
+    dev.log(
+      'Flutter framework error',
+      error: details.exception,
+      stackTrace: details.stack,
+    );
+  };
 
-  final handler = await AudioService.init(
-    builder: () => RadioAudioHandler(),
-    config: const AudioServiceConfig(
-      androidNotificationChannelId: 'com.example.flutter_radio.channel.audio',
-      androidNotificationChannelName: 'Radio Playback',
-      androidNotificationOngoing: true,
-      androidStopForegroundOnPause: true,
-    ),
-  );
-  runApp(MyApp(handler: handler));
+  // Catch uncaught async errors (outside zones)
+  PlatformDispatcher.instance.onError = (Object error, StackTrace stack) {
+    dev.log('Uncaught async error', error: error, stackTrace: stack);
+    // return false so the platform can also handle it if needed
+    return false;
+  };
+
+  // Protected zone for all async work
+  runZonedGuarded(() async {
+    // Immersive at start
+    await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+    SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
+      statusBarColor: Colors.transparent,
+      systemNavigationBarColor: Colors.black,
+      statusBarIconBrightness: Brightness.light,
+      systemNavigationBarIconBrightness: Brightness.light,
+    ));
+
+    RadioAudioHandler handler;
+    try {
+      handler = await AudioService.init(
+        builder: () => RadioAudioHandler(),
+        config: const AudioServiceConfig(
+          androidNotificationChannelId:
+          'com.example.flutter_radio.channel.audio',
+          androidNotificationChannelName: 'Radio Playback',
+          // важно: ongoing = false, чтобы не триггерить assert
+          androidNotificationOngoing: false,
+          androidStopForegroundOnPause: false,
+        ),
+      );
+    } catch (e, st) {
+      dev.log('AudioService.init failed', error: e, stackTrace: st);
+      handler = RadioAudioHandler();
+    }
+
+    runApp(MyApp(handler: handler));
+  }, (error, stack) {
+    dev.log('Uncaught zone error', error: error, stackTrace: stack);
+  });
 }
 
 class MyApp extends StatelessWidget {
@@ -150,9 +185,13 @@ class RadioAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler 
     // URL changed (e.g., current removed) — switch explicitly.
     _currentIndex = targetIndex;
     mediaItem.add(_items[_currentIndex]);
-    await _player.setAudioSource(AudioSource.uri(Uri.parse(targetId)));
-    if (wasPlaying) {
-      await _player.play();
+    try {
+      await _player.setAudioSource(AudioSource.uri(Uri.parse(targetId)));
+      if (wasPlaying) {
+        await _player.play();
+      }
+    } catch (e, st) {
+      dev.log('refreshQueue switch failed', error: e, stackTrace: st);
     }
   }
 
@@ -187,13 +226,21 @@ class RadioAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler 
     await _switchTo(_currentIndex);
   }
 
-  Future<void> setVolume(double v) async => _player.setVolume(v.clamp(0.0, 1.0));
+  Future<void> setVolume(double v) async =>
+      _player.setVolume(v.clamp(0.0, 1.0));
 
   Future<void> _switchTo(int index) async {
+    if (_items.isEmpty) return;
+    if (index < 0 || index >= _items.length) return;
+
     final item = _items[index];
     mediaItem.add(item);
-    await _player.setAudioSource(AudioSource.uri(Uri.parse(item.id)));
-    await _player.play();
+    try {
+      await _player.setAudioSource(AudioSource.uri(Uri.parse(item.id)));
+      await _player.play();
+    } catch (e, st) {
+      dev.log('switchTo failed', error: e, stackTrace: st);
+    }
   }
 
   AudioProcessingState _mapProcessingState(ProcessingState s) {
@@ -278,14 +325,16 @@ class WebRemoteServer {
 
   bool _checkAuth(HttpRequest req) {
     if (token == null) return true;
-    final got = req.uri.queryParameters['token'] ?? req.headers.value('x-api-key');
+    final got =
+        req.uri.queryParameters['token'] ?? req.headers.value('x-api-key');
     return got == token;
   }
 
   void _setCors(HttpResponse res) {
     res.headers.set('Access-Control-Allow-Origin', '*');
     res.headers.set('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-    res.headers.set('Access-Control-Allow-Headers', 'Content-Type,X-API-Key');
+    res.headers
+        .set('Access-Control-Allow-Headers', 'Content-Type,X-API-Key');
   }
 
   void _writeJson(HttpResponse res, String json, [int code = 200]) {
@@ -364,159 +413,228 @@ class WebRemoteServer {
           _writeJson(req.response, '{"ok":true}');
           break;
 
-        case '/volume': {
-          final vStr = req.uri.queryParameters['value'];
-          final v = double.tryParse(vStr ?? '');
-          if (v == null || v.isNaN) {
-            _writeJson(req.response, '{"ok":false,"error":"value 0..1 required"}', 400);
+        case '/volume':
+          {
+            final vStr = req.uri.queryParameters['value'];
+            final v = double.tryParse(vStr ?? '');
+            if (v == null || v.isNaN) {
+              _writeJson(
+                  req.response,
+                  '{"ok":false,"error":"value 0..1 required"}',
+                  400);
+              break;
+            }
+            final vol = v.clamp(0.0, 1.0);
+            if (getSoftPaused()) {
+              await onVolumeChanged(vol);
+            } else {
+              await handler.setVolume(vol);
+              await onVolumeChanged(vol);
+            }
+            _writeJson(req.response, '{"ok":true,"volume":$vol}');
             break;
           }
-          final vol = v.clamp(0.0, 1.0);
-          if (getSoftPaused()) {
-            await onVolumeChanged(vol);
-          } else {
-            await handler.setVolume(vol);
-            await onVolumeChanged(vol);
-          }
-          _writeJson(req.response, '{"ok":true,"volume":$vol}');
-          break;
-        }
 
-        case '/select': {
-          final idxStr = req.uri.queryParameters['index'];
-          final idx = int.tryParse(idxStr ?? '');
-          final stations = getStations();
-          if (idx == null || idx < 0 || idx >= stations.length) {
-            _writeJson(req.response, '{"ok":false,"error":"bad index"}', 400);
+        case '/select':
+          {
+            final idxStr = req.uri.queryParameters['index'];
+            final idx = int.tryParse(idxStr ?? '');
+            final stations = getStations();
+            if (idx == null || idx < 0 || idx >= stations.length) {
+              _writeJson(req.response,
+                  '{"ok":false,"error":"bad index"}', 400);
+              break;
+            }
+            await handler.skipToQueueItem(idx);
+            _writeJson(req.response, '{"ok":true}');
             break;
           }
-          await handler.skipToQueueItem(idx);
-          _writeJson(req.response, '{"ok":true}');
-          break;
-        }
 
       // stations list (short)
-        case '/stations': {
-          final stations = getStations();
-          final cur = getCurrentIndex();
-          final buf = StringBuffer('{"ok":true,"current":$cur,"items":[');
-          for (var i = 0; i < stations.length; i++) {
-            final s = stations[i];
-            buf.write('{"index":$i,"name":${_j(s.name)}}');
-            if (i != stations.length - 1) buf.write(',');
+        case '/stations':
+          {
+            final stations = getStations();
+            final cur = getCurrentIndex();
+            final buf =
+            StringBuffer('{"ok":true,"current":$cur,"items":[');
+            for (var i = 0; i < stations.length; i++) {
+              final s = stations[i];
+              buf.write('{"index":$i,"name":${_j(s.name)}}');
+              if (i != stations.length - 1) buf.write(',');
+            }
+            buf.write(']}');
+            _writeJson(req.response, buf.toString());
+            break;
           }
-          buf.write(']}');
-          _writeJson(req.response, buf.toString());
-          break;
-        }
 
       // stations list (full)
-        case '/stations/full': {
-          final stations = getStations();
-          final cur = getCurrentIndex();
-          final buf = StringBuffer('{"ok":true,"current":$cur,"items":[');
-          for (var i = 0; i < stations.length; i++) {
-            final s = stations[i];
-            buf.write('{"index":$i,"name":${_j(s.name)},"url":${_j(s.url)}}');
-            if (i != stations.length - 1) buf.write(',');
-          }
-          buf.write(']}');
-          _writeJson(req.response, buf.toString());
-          break;
-        }
-
-        case '/stations/add': {
-          if (req.method != 'POST') {
-            _writeJson(req.response, '{"ok":false,"error":"POST required"}', 405);
+        case '/stations/full':
+          {
+            final stations = getStations();
+            final cur = getCurrentIndex();
+            final buf =
+            StringBuffer('{"ok":true,"current":$cur,"items":[');
+            for (var i = 0; i < stations.length; i++) {
+              final s = stations[i];
+              buf.write(
+                  '{"index":$i,"name":${_j(s.name)},"url":${_j(s.url)}}');
+              if (i != stations.length - 1) buf.write(',');
+            }
+            buf.write(']}');
+            _writeJson(req.response, buf.toString());
             break;
           }
-          final data = await _readJson(req);
-          if (data == null) { _writeJson(req.response, '{"ok":false,"error":"bad json"}', 400); break; }
-          final name = (data['name'] ?? '').toString().trim();
-          final url  = (data['url']  ?? '').toString().trim();
-          if (name.isEmpty || url.isEmpty) {
-            _writeJson(req.response, '{"ok":false,"error":"name and url required"}', 400);
+
+        case '/stations/add':
+          {
+            if (req.method != 'POST') {
+              _writeJson(req.response,
+                  '{"ok":false,"error":"POST required"}', 405);
+              break;
+            }
+            final data = await _readJson(req);
+            if (data == null) {
+              _writeJson(req.response,
+                  '{"ok":false,"error":"bad json"}', 400);
+              break;
+            }
+            final name = (data['name'] ?? '').toString().trim();
+            final url = (data['url'] ?? '').toString().trim();
+            if (name.isEmpty || url.isEmpty) {
+              _writeJson(
+                  req.response,
+                  '{"ok":false,"error":"name and url required"}',
+                  400);
+              break;
+            }
+            final ok = await onAddStation(name, url);
+            _writeJson(
+                req.response, ok ? '{"ok":true}' : '{"ok":false}');
             break;
           }
-          final ok = await onAddStation(name, url);
-          _writeJson(req.response, ok ? '{"ok":true}' : '{"ok":false}');
-          break;
-        }
 
-        case '/stations/delete': {
-          if (req.method != 'POST') {
-            final idx = int.tryParse(req.uri.queryParameters['index'] ?? '');
-            if (idx == null) { _writeJson(req.response, '{"ok":false,"error":"POST or index param"}', 400); break; }
+        case '/stations/delete':
+          {
+            if (req.method != 'POST') {
+              final idx =
+              int.tryParse(req.uri.queryParameters['index'] ?? '');
+              if (idx == null) {
+                _writeJson(
+                    req.response,
+                    '{"ok":false,"error":"POST or index param"}',
+                    400);
+                break;
+              }
+              final ok = await onDeleteStation(idx);
+              _writeJson(
+                req.response,
+                ok ? '{"ok":true}' : '{"ok":false}',
+                ok ? 200 : 400,
+              );
+              break;
+            }
+            final data = await _readJson(req);
+            if (data == null || !data.containsKey('index')) {
+              _writeJson(req.response,
+                  '{"ok":false,"error":"index required"}', 400);
+              break;
+            }
+            final idx = int.tryParse(data['index'].toString());
+            if (idx == null) {
+              _writeJson(req.response,
+                  '{"ok":false,"error":"bad index"}', 400);
+              break;
+            }
             final ok = await onDeleteStation(idx);
-            _writeJson(req.response, ok ? '{"ok":true}' : '{"ok":false}', ok ? 200 : 400);
+            _writeJson(
+              req.response,
+              ok ? '{"ok":true}' : '{"ok":false}',
+              ok ? 200 : 400,
+            );
             break;
           }
-          final data = await _readJson(req);
-          if (data == null || !data.containsKey('index')) {
-            _writeJson(req.response, '{"ok":false,"error":"index required"}', 400); break;
-          }
-          final idx = int.tryParse(data['index'].toString());
-          if (idx == null) { _writeJson(req.response, '{"ok":false,"error":"bad index"}', 400); break; }
-          final ok = await onDeleteStation(idx);
-          _writeJson(req.response, ok ? '{"ok":true}' : '{"ok":false}', ok ? 200 : 400);
-          break;
-        }
 
-        case '/stations/reorder': {
-          if (req.method != 'POST') {
-            _writeJson(req.response, '{"ok":false,"error":"POST required"}', 405);
+        case '/stations/reorder':
+          {
+            if (req.method != 'POST') {
+              _writeJson(req.response,
+                  '{"ok":false,"error":"POST required"}', 405);
+              break;
+            }
+            final data = await _readJson(req);
+            if (data == null) {
+              _writeJson(req.response,
+                  '{"ok":false,"error":"bad json"}', 400);
+              break;
+            }
+            final oldIdx = int.tryParse(data['old'].toString());
+            final newIdx = int.tryParse(data['new'].toString());
+            if (oldIdx == null || newIdx == null) {
+              _writeJson(
+                  req.response,
+                  '{"ok":false,"error":"old/new required"}',
+                  400);
+              break;
+            }
+            final ok = await onReorderStations(oldIdx, newIdx);
+            _writeJson(
+              req.response,
+              ok ? '{"ok":true}' : '{"ok":false}',
+              ok ? 200 : 400,
+            );
             break;
           }
-          final data = await _readJson(req);
-          if (data == null) { _writeJson(req.response, '{"ok":false,"error":"bad json"}', 400); break; }
-          final oldIdx = int.tryParse(data['old'].toString());
-          final newIdx = int.tryParse(data['new'].toString());
-          if (oldIdx == null || newIdx == null) {
-            _writeJson(req.response, '{"ok":false,"error":"old/new required"}', 400); break;
-          }
-          final ok = await onReorderStations(oldIdx, newIdx);
-          _writeJson(req.response, ok ? '{"ok":true}' : '{"ok":false}', ok ? 200 : 400);
-          break;
-        }
 
         case '/settings':
           if (req.method == 'GET') {
             final live = getStartLiveOnResume();
-            _writeJson(req.response, '{"ok":true,"startLiveOnResume":$live}');
+            _writeJson(req.response,
+                '{"ok":true,"startLiveOnResume":$live}');
           } else if (req.method == 'POST') {
             final data = await _readJson(req);
-            if (data == null || !data.containsKey('startLiveOnResume')) {
-              _writeJson(req.response, '{"ok":false,"error":"startLiveOnResume required"}', 400);
+            if (data == null ||
+                !data.containsKey('startLiveOnResume')) {
+              _writeJson(
+                  req.response,
+                  '{"ok":false,"error":"startLiveOnResume required"}',
+                  400);
               break;
             }
-            final live = data['startLiveOnResume'] == true || data['startLiveOnResume'].toString() == 'true';
+            final live = data['startLiveOnResume'] == true ||
+                data['startLiveOnResume'].toString() == 'true';
             await onSetStartLive(live);
-            _writeJson(req.response, '{"ok":true,"startLiveOnResume":$live}');
+            _writeJson(req.response,
+                '{"ok":true,"startLiveOnResume":$live}');
           } else {
-            _writeJson(req.response, '{"ok":false,"error":"GET or POST"}', 405);
+            _writeJson(req.response,
+                '{"ok":false,"error":"GET or POST"}', 405);
           }
           break;
 
-        case '/status': {
-          final stations2 = getStations();
-          final cur2 = getCurrentIndex();
-          final now = getNowTitle();
-          final vol = getVolume();
-          final st = handler.playbackState.value;
-          final soft = getSoftPaused();
-          final live = getStartLiveOnResume();
-          final name = (cur2 >= 0 && cur2 < stations2.length) ? stations2[cur2].name : null;
+        case '/status':
+          {
+            final stations2 = getStations();
+            final cur2 = getCurrentIndex();
+            final now = getNowTitle();
+            final vol = getVolume();
+            final st = handler.playbackState.value;
+            final soft = getSoftPaused();
+            final live = getStartLiveOnResume();
+            final name = (cur2 >= 0 && cur2 < stations2.length)
+                ? stations2[cur2].name
+                : null;
 
-          final playingFlag = soft ? false : st.playing; // mask soft pause
+            final playingFlag =
+            soft ? false : st.playing; // mask soft pause
 
-          _writeJson(
+            _writeJson(
               req.response,
               '{"ok":true,"playing":$playingFlag,"currentIndex":$cur2,'
                   '"station":${_j(name)},"title":${_j(now)},"volume":$vol,'
-                  '"softPaused":$soft,"startLiveOnResume":$live}'
-          );
-          break;
-        }
+                  '"softPaused":$soft,"startLiveOnResume":$live}',
+            );
+            break;
+          }
 
         default:
           req.response.statusCode = HttpStatus.notFound;
@@ -794,7 +912,11 @@ async function buildEdit(){
       liveEl.checked = !!s.startLiveOnResume;
       liveEl.onchange = async () => {
         const en = liveEl.checked;
-        const res = await fetch(qp('/settings'), {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({startLiveOnResume: en})});
+        const res = await fetch(qp('/settings'), {
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({startLiveOnResume: en})
+        });
         document.getElementById('liveMsg').textContent = res.ok ? 'Saved' : 'Error';
         setTimeout(()=>{ document.getElementById('liveMsg').textContent=''; }, 1200);
       };
@@ -807,7 +929,11 @@ async function addStation(){
   const u = document.getElementById('url').value.trim();
   const msg = document.getElementById('msg');
   if(!n || !u){ msg.textContent='Enter name and URL'; return; }
-  const res = await fetch(qp('/stations/add'), {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name:n,url:u})});
+  const res = await fetch(qp('/stations/add'), {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({name:n,url:u})
+  });
   msg.textContent = res.ok ? 'Added' : 'Error';
   document.getElementById('name').value='';
   document.getElementById('url').value='';
@@ -815,7 +941,11 @@ async function addStation(){
 }
 
 async function delStation(i){
-  await fetch(qp('/stations/delete'), {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({index:i})});
+  await fetch(qp('/stations/delete'), {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({index:i})
+  });
   await buildEdit(); await refresh();
 }
 
@@ -823,7 +953,11 @@ async function reorder(oldI,newI){
   if(oldI===newI) return;
   if(newI < 0) newI = 0;
   const u = qp('/stations/reorder');
-  await fetch(u, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({old:oldI,new:newI})});
+  await fetch(u, {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({old:oldI,new:newI})
+  });
   await buildEdit(); await refresh();
 }
 
@@ -913,9 +1047,15 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-  // ---- NEW: pretty drag proxy and compact tile used by SliverReorderableList
-  Widget _dragProxyDecorator(BuildContext context, Widget child, int index, Animation<double> anim) {
-    final curved = CurvedAnimation(parent: anim, curve: Curves.easeOutCubic);
+  // Pretty drag proxy for SliverReorderableList
+  Widget _dragProxyDecorator(
+      BuildContext context,
+      Widget child,
+      int index,
+      Animation<double> anim,
+      ) {
+    final curved =
+    CurvedAnimation(parent: anim, curve: Curves.easeOutCubic);
     return ScaleTransition(
       scale: Tween<double>(begin: 1.0, end: 1.02).animate(curved),
       child: Material(
@@ -951,7 +1091,6 @@ class _HomePageState extends State<HomePage> {
       },
     );
   }
-  // ---- END NEW
 
   @override
   void initState() {
@@ -986,16 +1125,15 @@ class _HomePageState extends State<HomePage> {
       await widget.handler.setVolume(_volume);
 
       _miSub?.cancel();
-      _miSub = widget.handler.mediaItem.listen((item) async {
+      _miSub = widget.handler.mediaItem.listen((item) {
         if (item == null) return;
+        // Update only UI state, no disk/scroll here
         final idx = _stations.indexWhere((s) => s.url == item.id);
         if (idx != -1) {
           setState(() {
             _currentIndex = idx;
             _nowTitle = item.title;
           });
-          await storage.saveLastIndex(idx);
-          await _ensureSelectedVisible();
         } else {
           setState(() => _nowTitle = item.title);
         }
@@ -1004,7 +1142,7 @@ class _HomePageState extends State<HomePage> {
       if (mounted) setState(() {});
       _syncItemKeys();
 
-      // Autostart web remote if it was on
+      // Autostart web remote if it was enabled earlier
       if (shouldStartWeb) {
         await _toggleServer(true);
       }
@@ -1021,10 +1159,12 @@ class _HomePageState extends State<HomePage> {
           ? _stations[_currentIndex].url
           : widget.handler.mediaItem.valueOrNull?.id;
 
-      setState(() => _stations = List.of(_stations)..add(Station(name: name, url: url)));
+      setState(() =>
+      _stations = List.of(_stations)..add(Station(name: name, url: url)));
       await storage.saveStations(_stations);
 
-      final items = _stations.map((s) => MediaItem(id: s.url, title: s.name)).toList();
+      final items =
+      _stations.map((s) => MediaItem(id: s.url, title: s.name)).toList();
       await widget.handler.refreshQueue(items, preserveByUrl: currentUrl);
       _syncItemKeys();
       return true;
@@ -1044,10 +1184,13 @@ class _HomePageState extends State<HomePage> {
       setState(() => _stations = List.of(_stations)..removeAt(i));
       await storage.saveStations(_stations);
 
-      final items = _stations.map((s) => MediaItem(id: s.url, title: s.name)).toList();
-      _currentIndex = _stations.isEmpty ? 0 : _currentIndex.clamp(0, _stations.length - 1);
+      final items =
+      _stations.map((s) => MediaItem(id: s.url, title: s.name)).toList();
+      _currentIndex =
+      _stations.isEmpty ? 0 : _currentIndex.clamp(0, _stations.length - 1);
 
       await widget.handler.refreshQueue(items, preserveByUrl: currentUrl);
+      await storage.saveLastIndex(_currentIndex);
       _syncItemKeys();
       return true;
     } catch (e, st) {
@@ -1071,10 +1214,12 @@ class _HomePageState extends State<HomePage> {
       });
 
       await storage.saveStations(_stations);
-      final items = _stations.map((s) => MediaItem(id: s.url, title: s.name)).toList();
+      final items =
+      _stations.map((s) => MediaItem(id: s.url, title: s.name)).toList();
 
-      final restoredIndex =
-      currentUrl == null ? newIndex : _stations.indexWhere((s) => s.url == currentUrl);
+      final restoredIndex = currentUrl == null
+          ? newIndex
+          : _stations.indexWhere((s) => s.url == currentUrl);
       _currentIndex = restoredIndex < 0 ? 0 : restoredIndex;
 
       await widget.handler.refreshQueue(items, preserveByUrl: currentUrl);
@@ -1138,27 +1283,31 @@ class _HomePageState extends State<HomePage> {
           onAddStation: (n, u) => _addStationByValues(n, u),
           onDeleteStation: (i) => _deleteStationByIndex(i),
           onReorderStations: (o, n) => _reorderStationsPublic(o, n),
-
           getStartLiveOnResume: () => _startLiveOnResume,
           getSoftPaused: () => _softPaused,
           onSoftPause: () async {
             if (!_softPaused) _preMuteVolume = _volume;
             await widget.handler.setVolume(0.0);
-            setState(() { _softPaused = true; });
+            setState(() {
+              _softPaused = true;
+            });
           },
           onSoftResume: () async {
             await widget.handler.setVolume(_preMuteVolume);
-            setState(() { _softPaused = false; });
+            setState(() {
+              _softPaused = false;
+            });
           },
           onSetStartLive: (enabled) async {
             setState(() => _startLiveOnResume = enabled);
             await storage.saveStartLiveOnResume(enabled);
           },
-
           port: 8080,
           token: null,
         );
         await _remote!.start();
+
+        // LAN lookup in separate isolate (non-blocking)
         _lanUrl = await _findLanUrl(port: _remote!.port);
 
         await storage.saveWebRemoteEnabled(true);
@@ -1184,22 +1333,27 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-  Future<String?> _findLanUrl({required int port}) async {
-    try {
-      final ifs = await NetworkInterface.list(type: InternetAddressType.IPv4);
-      for (final ni in ifs) {
-        for (final addr in ni.addresses) {
-          final ip = addr.address;
-          if (!addr.isLoopback &&
-              (ip.startsWith('192.168.') ||
-                  ip.startsWith('10.') ||
-                  ip.startsWith(RegExp(r'^172\\.(1[6-9]|2[0-9]|3[0-1])')))) {
-            return 'http://$ip:$port';
+  Future<String?> _findLanUrl({required int port}) {
+    // Run on a background isolate to avoid blocking the UI isolate
+    return Isolate.run<String?>(() async {
+      try {
+        final ifs =
+        await NetworkInterface.list(type: InternetAddressType.IPv4);
+        for (final ni in ifs) {
+          for (final addr in ni.addresses) {
+            final ip = addr.address;
+            final is172 = RegExp(r'^172\.(1[6-9]|2[0-9]|3[0-1])').hasMatch(ip);
+            if (!addr.isLoopback &&
+                (ip.startsWith('192.168.') ||
+                    ip.startsWith('10.') ||
+                    is172)) {
+              return 'http://$ip:$port';
+            }
           }
         }
-      }
-    } catch (_) {}
-    return null;
+      } catch (_) {}
+      return null;
+    });
   }
 
   @override
@@ -1244,23 +1398,31 @@ class _HomePageState extends State<HomePage> {
                               children: [
                                 const SizedBox(height: 8),
                                 Container(
-                                  width: 44, height: 4,
+                                  width: 44,
+                                  height: 4,
                                   decoration: BoxDecoration(
                                     color: Colors.white24,
                                     borderRadius: BorderRadius.circular(2),
                                   ),
                                 ),
                                 Padding(
-                                  padding: const EdgeInsets.fromLTRB(16, 12, 8, 8),
+                                  padding: const EdgeInsets.fromLTRB(
+                                      16, 12, 8, 8),
                                   child: Row(
                                     children: [
-                                      const Text('Stations editor',
-                                          style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+                                      const Text(
+                                        'Stations editor',
+                                        style: TextStyle(
+                                          fontSize: 16,
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                      ),
                                       const Spacer(),
                                       IconButton(
                                         tooltip: 'Close',
                                         icon: const Icon(Icons.close),
-                                        onPressed: () => Navigator.of(ctx).pop(),
+                                        onPressed: () =>
+                                            Navigator.of(ctx).pop(),
                                       ),
                                     ],
                                   ),
@@ -1272,11 +1434,14 @@ class _HomePageState extends State<HomePage> {
                           // --- ADD STATION (TOP) ---
                           SliverToBoxAdapter(
                             child: Padding(
-                              padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+                              padding:
+                              const EdgeInsets.fromLTRB(12, 0, 12, 8),
                               child: Card(
-                                color: Colors.blueGrey.withOpacity(0.15),
+                                color:
+                                Colors.blueGrey.withOpacity(0.15),
                                 child: Padding(
-                                  padding: const EdgeInsets.fromLTRB(12, 12, 12, 12),
+                                  padding: const EdgeInsets.fromLTRB(
+                                      12, 12, 12, 12),
                                   child: Column(
                                     children: [
                                       Row(
@@ -1284,10 +1449,13 @@ class _HomePageState extends State<HomePage> {
                                           Expanded(
                                             child: TextField(
                                               controller: nameCtrl,
-                                              textInputAction: TextInputAction.next,
-                                              decoration: const InputDecoration(
+                                              textInputAction:
+                                              TextInputAction.next,
+                                              decoration:
+                                              const InputDecoration(
                                                 labelText: 'Name',
-                                                border: OutlineInputBorder(),
+                                                border:
+                                                OutlineInputBorder(),
                                               ),
                                             ),
                                           ),
@@ -1296,12 +1464,16 @@ class _HomePageState extends State<HomePage> {
                                             flex: 2,
                                             child: TextField(
                                               controller: urlCtrl,
-                                              textInputAction: TextInputAction.done,
-                                              decoration: const InputDecoration(
+                                              textInputAction:
+                                              TextInputAction.done,
+                                              decoration:
+                                              const InputDecoration(
                                                 labelText: 'Stream URL',
-                                                border: OutlineInputBorder(),
+                                                border:
+                                                OutlineInputBorder(),
                                               ),
-                                              onSubmitted: (_) => _addStation(),
+                                              onSubmitted: (_) =>
+                                                  _addStation(),
                                             ),
                                           ),
                                         ],
@@ -1311,7 +1483,8 @@ class _HomePageState extends State<HomePage> {
                                         width: double.infinity,
                                         child: FilledButton(
                                           onPressed: _addStation,
-                                          child: const Text('Add station'),
+                                          child:
+                                          const Text('Add station'),
                                         ),
                                       ),
                                     ],
@@ -1322,38 +1495,50 @@ class _HomePageState extends State<HomePage> {
                           ),
 
                           // --- REORDER / DELETE LIST ---
-                          // --- REORDER / DELETE LIST ---
                           SliverPadding(
-                            padding: const EdgeInsets.symmetric(horizontal: 8),
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 8),
                             sliver: SliverReorderableList(
                               itemBuilder: (context, i) =>
-                                  _stationTile(s: _stations[i], index: i),
+                                  _stationTile(
+                                      s: _stations[i], index: i),
                               itemCount: _stations.length,
-                              onReorder: (oldIndex, newIndex) async {
-                                await _reorderStations(oldIndex, newIndex);
+                              onReorder:
+                                  (oldIndex, newIndex) async {
+                                await _reorderStations(
+                                    oldIndex, newIndex);
                               },
-                              proxyDecorator: (child, index, animation) =>
-                                  _dragProxyDecorator(ctx, child, index, animation),
+                              proxyDecorator:
+                                  (child, index, animation) =>
+                                  _dragProxyDecorator(
+                                      ctx, child, index, animation),
                             ),
                           ),
 
                           // --- SETTINGS (COLLAPSIBLE, BOTTOM) ---
                           SliverToBoxAdapter(
                             child: Padding(
-                              padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
+                              padding: const EdgeInsets.fromLTRB(
+                                  12, 8, 12, 12),
                               child: Card(
-                                color: Colors.blueGrey.withOpacity(0.15),
+                                color:
+                                Colors.blueGrey.withOpacity(0.15),
                                 child: Theme(
-                                  data: Theme.of(ctx).copyWith(dividerColor: Colors.white10),
+                                  data: Theme.of(ctx).copyWith(
+                                      dividerColor: Colors.white10),
                                   child: ExpansionTile(
                                     initiallyExpanded: false,
                                     title: const Text('Settings'),
-                                    subtitle: const Text('Web remote & live mode'),
-                                    childrenPadding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+                                    subtitle: const Text(
+                                        'Web remote & live mode'),
+                                    childrenPadding:
+                                    const EdgeInsets.fromLTRB(
+                                        12, 0, 12, 12),
                                     children: [
                                       // Web remote toggle
                                       SwitchListTile(
-                                        title: const Text('Web remote over Wi-Fi'),
+                                        title: const Text(
+                                            'Web remote over Wi-Fi'),
                                         subtitle: Text(
                                           _serverBusy
                                               ? 'starting…'
@@ -1364,24 +1549,38 @@ class _HomePageState extends State<HomePage> {
                                               : 'disabled'),
                                         ),
                                         value: _serverEnabled,
-                                        onChanged: _serverBusy ? null : (v) => _toggleServer(v),
+                                        onChanged: _serverBusy
+                                            ? null
+                                            : (v) =>
+                                            _toggleServer(v),
                                       ),
                                       if (_serverBusy)
                                         const Padding(
-                                          padding: EdgeInsets.only(bottom: 8),
-                                          child: LinearProgressIndicator(minHeight: 2),
+                                          padding: EdgeInsets.only(
+                                              bottom: 8),
+                                          child:
+                                          LinearProgressIndicator(
+                                            minHeight: 2,
+                                          ),
                                         ),
 
                                       // Live / soft pause toggle
                                       SwitchListTile(
-                                        title: const Text('Resume from live position'),
-                                        subtitle: Text(_startLiveOnResume
-                                            ? 'Pause mutes audio but keeps the stream'
-                                            : 'Pause stops the stream'),
+                                        title: const Text(
+                                            'Resume from live position'),
+                                        subtitle: Text(
+                                          _startLiveOnResume
+                                              ? 'Pause mutes audio but keeps the stream'
+                                              : 'Pause stops the stream',
+                                        ),
                                         value: _startLiveOnResume,
                                         onChanged: (v) async {
-                                          setState(() => _startLiveOnResume = v);
-                                          await storage.saveStartLiveOnResume(v);
+                                          setState(() =>
+                                          _startLiveOnResume =
+                                              v);
+                                          await storage
+                                              .saveStartLiveOnResume(
+                                              v);
                                         },
                                       ),
                                     ],
@@ -1391,7 +1590,9 @@ class _HomePageState extends State<HomePage> {
                             ),
                           ),
 
-                          const SliverToBoxAdapter(child: SizedBox(height: 16)),
+                          const SliverToBoxAdapter(
+                            child: SizedBox(height: 16),
+                          ),
                         ],
                       ),
                     ),
@@ -1424,13 +1625,16 @@ class _HomePageState extends State<HomePage> {
                         if (_stations.isEmpty) return;
                         final len = _stations.length;
                         final wasFirst = (_currentIndex == 0);
-                        setState(() => _currentIndex = (_currentIndex - 1 + len) % len);
+                        setState(() => _currentIndex =
+                            (_currentIndex - 1 + len) % len);
                         await storage.saveLastIndex(_currentIndex);
-                        await widget.handler.skipToQueueItem(_currentIndex);
+                        await widget.handler
+                            .skipToQueueItem(_currentIndex);
                         if (wasFirst && _listCtrl.hasClients) {
                           await _listCtrl.animateTo(
                             _listCtrl.position.maxScrollExtent,
-                            duration: const Duration(milliseconds: 250),
+                            duration: const Duration(
+                                milliseconds: 250),
                             curve: Curves.easeOut,
                           );
                         } else {
@@ -1439,21 +1643,34 @@ class _HomePageState extends State<HomePage> {
                       },
                     ),
                     IconButton(
-                      icon: Icon(playing ? Icons.pause : Icons.play_arrow, size: 36),
+                      icon: Icon(
+                        playing
+                            ? Icons.pause
+                            : Icons.play_arrow,
+                        size: 36,
+                      ),
                       tooltip: playing ? 'Pause' : 'Play',
                       onPressed: () async {
                         if (playing || _softPaused) {
                           if (_startLiveOnResume) {
-                            if (!_softPaused) _preMuteVolume = _volume;
-                            await widget.handler.setVolume(0.0); // mute
-                            setState(() { _softPaused = true; });
+                            if (!_softPaused) {
+                              _preMuteVolume = _volume;
+                            }
+                            await widget.handler
+                                .setVolume(0.0); // mute
+                            setState(() {
+                              _softPaused = true;
+                            });
                           } else {
                             await widget.handler.pause();
                           }
                         } else {
                           if (_startLiveOnResume && _softPaused) {
-                            await widget.handler.setVolume(_preMuteVolume); // unmute
-                            setState(() { _softPaused = false; });
+                            await widget.handler
+                                .setVolume(_preMuteVolume); // unmute
+                            setState(() {
+                              _softPaused = false;
+                            });
                           } else {
                             if (_stations.isEmpty) return;
                             await widget.handler.play();
@@ -1467,14 +1684,18 @@ class _HomePageState extends State<HomePage> {
                       onPressed: () async {
                         if (_stations.isEmpty) return;
                         final len = _stations.length;
-                        final wasLast = (_currentIndex == len - 1);
-                        setState(() => _currentIndex = (_currentIndex + 1) % len);
+                        final wasLast =
+                        (_currentIndex == len - 1);
+                        setState(() => _currentIndex =
+                            (_currentIndex + 1) % len);
                         await storage.saveLastIndex(_currentIndex);
-                        await widget.handler.skipToQueueItem(_currentIndex);
+                        await widget.handler
+                            .skipToQueueItem(_currentIndex);
                         if (wasLast && _listCtrl.hasClients) {
                           await _listCtrl.animateTo(
                             0,
-                            duration: const Duration(milliseconds: 250),
+                            duration: const Duration(
+                                milliseconds: 250),
                             curve: Curves.easeOut,
                           );
                         } else {
@@ -1490,15 +1711,21 @@ class _HomePageState extends State<HomePage> {
                   stream: widget.handler.mediaItem,
                   builder: (context, snap) {
                     final title = snap.data?.title ?? _nowTitle;
-                    if (title == null || title.isEmpty) return const SizedBox(height: 6);
+                    if (title == null || title.isEmpty) {
+                      return const SizedBox(height: 6);
+                    }
                     return Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 6,
+                      ),
                       child: Text(
                         title,
                         maxLines: 2,
                         overflow: TextOverflow.ellipsis,
                         textAlign: TextAlign.center,
-                        style: Theme.of(context).textTheme.titleMedium,
+                        style:
+                        Theme.of(context).textTheme.titleMedium,
                       ),
                     );
                   },
@@ -1506,7 +1733,8 @@ class _HomePageState extends State<HomePage> {
 
                 // Volume
                 Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  padding:
+                  const EdgeInsets.symmetric(horizontal: 16),
                   child: Row(
                     children: [
                       const Icon(Icons.volume_down),
@@ -1516,10 +1744,12 @@ class _HomePageState extends State<HomePage> {
                           onChanged: (v) async {
                             setState(() => _volume = v);
                             if (_softPaused) {
-                              _preMuteVolume = v; // remember desired volume
+                              _preMuteVolume =
+                                  v; // remember desired volume
                               await storage.saveVolume(v);
                             } else {
-                              await widget.handler.setVolume(v);
+                              await widget.handler
+                                  .setVolume(v);
                               await storage.saveVolume(v);
                             }
                           },
@@ -1534,29 +1764,38 @@ class _HomePageState extends State<HomePage> {
                 Expanded(
                   child: ListView.builder(
                     controller: _listCtrl,
-                    keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+                    keyboardDismissBehavior:
+                    ScrollViewKeyboardDismissBehavior.onDrag,
                     itemCount: _stations.length,
                     itemBuilder: (context, i) {
                       final s = _stations[i];
                       final isSelected = i == _currentIndex;
                       return Container(
-                        key: _itemKeys.length == _stations.length ? _itemKeys[i] : null,
+                        key: _itemKeys.length == _stations.length
+                            ? _itemKeys[i]
+                            : null,
                         child: ListTile(
                           leading: isSelected
-                              ? const Icon(Icons.play_arrow_rounded)
+                              ? const Icon(
+                              Icons.play_arrow_rounded)
                               : const SizedBox(width: 24),
                           title: Text(
                             s.name,
                             style: isSelected
-                                ? const TextStyle(fontWeight: FontWeight.w600)
+                                ? const TextStyle(
+                              fontWeight:
+                              FontWeight.w600,
+                            )
                                 : null,
                           ),
                           selected: isSelected,
-                          selectedTileColor: Colors.blueGrey.withOpacity(0.35),
+                          selectedTileColor: Colors.blueGrey
+                              .withOpacity(0.35),
                           onTap: () async {
                             _currentIndex = i;
                             await storage.saveLastIndex(i);
-                            await widget.handler.skipToQueueItem(i);
+                            await widget.handler
+                                .skipToQueueItem(i);
                             await _ensureSelectedVisible();
                           },
                         ),
